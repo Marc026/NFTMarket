@@ -1,13 +1,11 @@
 import { useState } from 'react'
 import { ethers } from "ethers"
-import { Row, Form, Button } from 'react-bootstrap'
+import { Row, Form, Button, Alert } from 'react-bootstrap'
 import axios from 'axios'
 
-// Pinata configuration (replace with your actual keys)
-const pinataApiKey = 'c8974ade8a91d87a55ac';  // Replace with your Pinata API key
-const pinataSecretApiKey = 'bd362ea72c991e4d9139cd69a2b4dd8de26c92c2d3a16d3404b68033734cdc8e';  // Replace with your Pinata secret API key
+const pinataApiKey = 'c8974ade8a91d87a55ac';
+const pinataSecretApiKey = 'bd362ea72c991e4d9139cd69a2b4dd8de26c92c2d3a16d3404b68033734cdc8e';
 
-// Pinata authentication headers
 const pinataAuth = {
   headers: {
     'pinata_api_key': pinataApiKey,
@@ -15,12 +13,13 @@ const pinataAuth = {
   }
 };
 
-const Create = ({ marketplace, nft }) => {
+const Create = ({ marketplace, nft, setError }) => {
   const [image, setImage] = useState('')
   const [price, setPrice] = useState(null)
   const [name, setName] = useState('')
   const [description, setDescription] = useState('')
   const [uploading, setUploading] = useState(false)
+  const [localError, setLocalError] = useState('')
 
   const uploadToIPFS = async (event) => {
     event.preventDefault()
@@ -28,20 +27,19 @@ const Create = ({ marketplace, nft }) => {
     if (typeof file !== 'undefined') {
       try {
         setUploading(true)
+        setLocalError('')
         
-        // Prepare form data to upload to Pinata
         const formData = new FormData()
         formData.append('file', file)
 
-        // Upload file to Pinata
         const result = await axios.post('https://api.pinata.cloud/pinning/pinFileToIPFS', formData, pinataAuth)
         console.log('Pinata IPFS Result:', result.data)
         
-        // Set the image URL from Pinata's IPFS gateway
         setImage(`https://gateway.pinata.cloud/ipfs/${result.data.IpfsHash}`)
         setUploading(false)
       } catch (error) {
         console.error("Pinata image upload error: ", error)
+        setLocalError('Failed to upload image. Please try again.')
         setUploading(false)
       }
     }
@@ -49,31 +47,55 @@ const Create = ({ marketplace, nft }) => {
 
   const createNFT = async () => {
     if (!image || !price || !name || !description) {
-      return alert("Please fill all fields")
+      setLocalError("Please fill all fields")
+      return
     }
 
     try {
-      // Add metadata to IPFS
+      setLocalError('')
       const metadata = { image, name, description }
       const result = await axios.post('https://api.pinata.cloud/pinning/pinJSONToIPFS', metadata, pinataAuth)
-      console.log('Pinata Metadata Result:', result.data)
-      mintThenList(result.data)
+      await mintThenList(result.data)
     } catch (error) {
-      console.error("Pinata metadata upload error: ", error)
+      console.error("NFT creation error: ", error)
+      setLocalError('Failed to create NFT. Please check your wallet and try again.')
+      if (error.code === 4001) {
+        setLocalError('Transaction was rejected in MetaMask.')
+      } else if (error.code === -32603) {
+        setLocalError('Insufficient funds to complete the transaction.')
+      }
     }
   }
 
   const mintThenList = async (metadata) => {
-    const uri = `https://gateway.pinata.cloud/ipfs/${metadata.IpfsHash}`
-    // Mint NFT 
-    await (await nft.mint(uri)).wait()
-    // Get tokenId of new NFT
-    const id = await nft.tokenCount()
-    // Approve marketplace to spend NFT
-    await (await nft.setApprovalForAll(marketplace.address, true)).wait()
-    // Add NFT to marketplace
-    const listingPrice = ethers.utils.parseEther(price.toString())
-    await (await marketplace.makeItem(nft.address, id, listingPrice)).wait()
+    try {
+      const uri = `https://gateway.pinata.cloud/ipfs/${metadata.IpfsHash}`
+      // Mint NFT 
+      const mintTx = await nft.mint(uri)
+      await mintTx.wait()
+      
+      // Get tokenId of new NFT
+      const id = await nft.tokenCount()
+      
+      // Approve marketplace to spend NFT
+      const approveTx = await nft.setApprovalForAll(marketplace.address, true)
+      await approveTx.wait()
+      
+      // Add NFT to marketplace
+      const listingPrice = ethers.utils.parseEther(price.toString())
+      const listTx = await marketplace.makeItem(nft.address, id, listingPrice)
+      await listTx.wait()
+    } catch (error) {
+      console.error("Minting error: ", error)
+      if (error.code === 4001) {
+        setLocalError('Transaction was rejected in MetaMask.')
+      } else if (error.code === -32603) {
+        setLocalError('Insufficient funds to complete the transaction.')
+      } else {
+        setLocalError('Failed to mint and list NFT. Please try again.')
+      }
+      throw error // Re-throw to be caught by createNFT's catch block
+    }
   }
 
   return (
@@ -81,6 +103,16 @@ const Create = ({ marketplace, nft }) => {
       <div className="row">
         <main role="main" className="col-lg-12 mx-auto" style={{ maxWidth: '1000px' }}>
           <div className="content mx-auto">
+            {localError && (
+              <Alert 
+                variant="danger" 
+                onClose={() => setLocalError('')} 
+                dismissible
+                className="mb-4"
+              >
+                {localError}
+              </Alert>
+            )}
             <Row className="g-4">
               <Form.Control
                 type="file"
